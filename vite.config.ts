@@ -7,6 +7,32 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        watch: {
+          ignored: [
+            '**/node_modules/**',
+            '**/dist/**',
+            '**/.git/**',
+            '**/__smoke__/**',
+            '**/*.tmpdir/**',
+          ],
+        },
+        // 本机 OpenAI 兼容网关（不回 CORS 头），走同源代理
+        proxy: {
+          '/v1': {
+            target: 'http://127.0.0.1:4110',
+            changeOrigin: true,
+          },
+        },
+      },
+      preview: {
+        port: 3100,
+        host: '0.0.0.0',
+        proxy: {
+          '/v1': {
+            target: 'http://127.0.0.1:4110',
+            changeOrigin: true,
+          },
+        },
       },
       plugins: [react()],
       resolve: {
