@@ -1,11 +1,16 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import * as d3 from 'd3';
 import { BPlusTreeNode } from '../types';
+import { SearchStep, SeparatorConvention, maxKeyOfSubtree } from '../utils/bPlusTreeLogic';
 
 interface TreeVisualizerProps {
   root: BPlusTreeNode;
   onNodeClick?: (nodeAttributes: any) => void;
   indexType: 'primary' | 'secondary';
+  /** 传入则演示一次查找：路径高亮、其余变淡 */
+  search?: { steps: SearchStep[]; found: boolean; key: number; leafId: string } | null;
+  /** 分隔键写法：innodb = 右侧最小键，textbook = 左侧最大键 */
+  convention?: SeparatorConvention;
 }
 
 // Convert our B+ Tree Nodes to a D3 Hierarchy compatible format
@@ -13,18 +18,25 @@ const convertToHierarchy = (node: BPlusTreeNode, indexType: 'primary' | 'seconda
   if (node.isLeaf) {
     return {
       name: `Leaf-${node.id}`,
-      attributes: { keys: node.keys, data: node.data, isLeaf: true, nextId: node.next ? `Leaf-${node.next.id}` : null, indexType },
+      attributes: { id: node.id, keys: node.keys, data: node.data, isLeaf: true, nextId: node.next ? `Leaf-${node.next.id}` : null, indexType },
       children: []
     };
   }
   return {
     name: `Internal-${node.id}`,
-    attributes: { keys: node.keys, isLeaf: false, indexType },
+    attributes: {
+      id: node.id,
+      keys: node.keys,
+      // 教科书画法要显示"左侧子页最大键"（最后一格是兜底，不占键位）
+      boundaryKeys: node.children.slice(0, -1).map(c => maxKeyOfSubtree(c)),
+      isLeaf: false,
+      indexType,
+    },
     children: node.children.map(c => convertToHierarchy(c, indexType))
   };
 };
 
-const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, indexType }) => {
+const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, indexType, search, convention = 'innodb' }) => {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
@@ -32,6 +44,8 @@ const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, inde
   // INCREASED WIDTH to accommodate 3 keys (Order 4) without overflow
   const nodeWidth = indexType === 'primary' ? 220 : 180; 
   const nodeHeight = 60;
+  // 与 flex 布局的 px-2 一致，用于把连线对准键单元
+  const EDGE_PAD = 8;
 
   const [selectedNode, setSelectedNode] = useState<d3.HierarchyPointNode<any> | null>(null);
 
@@ -171,6 +185,17 @@ const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, inde
     }
   };
 
+  // 查找演示：节点 -> 步骤序号，以及路径上的连线
+  const stepIndex = new Map<string, number>();
+  search?.steps.forEach((s, idx) => stepIndex.set(s.nodeId, idx + 1));
+  const pathLinks = new Set<string>();
+  if (search) {
+    for (let i = 0; i < search.steps.length - 1; i++) {
+      pathLinks.add(`${search.steps[i].nodeId}->${search.steps[i + 1].nodeId}`);
+    }
+  }
+  const hitLeafId = search?.found ? search.leafId : null;
+
   return (
     <div ref={wrapperRef} className="w-full h-full bg-slate-50 border rounded-xl shadow-inner relative overflow-hidden">
        <div className="absolute top-2 left-2 text-xs text-gray-500 font-mono pointer-events-none z-10 bg-white/90 p-1.5 rounded border border-gray-200 shadow-sm backdrop-blur-sm">
@@ -209,23 +234,79 @@ const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, inde
           <g ref={gRef}>
               {/* Tree Links (Parent to Child) */}
               {links.map((link, i) => {
-                const sourceX = link.source.x + nodeWidth / 2;
+                // 连线必须从"分隔键"底下出发，否则 n 个键 + n+1 个子页的对应关系看不出来。
+                // 规则与 searchLeafNode() 一致：key >= 分隔键 走右侧，首键之前走最左子页。
+                // 也就是说 children[i] (i>=1) 的分隔键是 keys[i-1]，children[0] 没有分隔键。
+                const childIdx = link.source.children
+                  ? link.source.children.indexOf(link.target)
+                  : -1;
+                const attrs = link.source.data.attributes;
+                const keyCount = attrs.keys.length;
+                const shownKeys: number[] =
+                  convention === 'textbook'
+                    ? (attrs.boundaryKeys as (number | undefined)[]).filter((k): k is number => k !== undefined)
+                    : (attrs.keys as number[]);
+                const innerWidth = nodeWidth - EDGE_PAD * 2;
+                const cellWidth = keyCount > 0 ? innerWidth / keyCount : 0;
+
+                // innodb：从对应分隔键格下方出发；textbook：从两格之间的缝隙出发（右侧是子页）
+                let sourceX: number;
+                if (convention === 'textbook') {
+                  if (childIdx <= 0) sourceX = link.source.x + EDGE_PAD * 0.5;
+                  else if (childIdx >= keyCount) sourceX = link.source.x + nodeWidth - EDGE_PAD * 0.5;
+                  else sourceX = link.source.x + EDGE_PAD + childIdx * cellWidth;
+                } else if (childIdx > 0 && keyCount > 0) {
+                  sourceX = link.source.x + EDGE_PAD + (childIdx - 0.5) * cellWidth;
+                } else if (childIdx === 0) {
+                  sourceX = link.source.x + EDGE_PAD * 0.5;
+                } else {
+                  sourceX = link.source.x + nodeWidth / 2;
+                }
+
                 const sourceY = link.source.y + nodeHeight;
                 const targetX = link.target.x + nodeWidth / 2;
                 const targetY = link.target.y;
                 
                 // Check if this link should be highlighted
                 const isHighlighted = selectedNode && link.source === selectedNode;
+                const onPath = pathLinks.has(`${attrs.id}->${link.target.data.attributes.id}`);
 
-                const strokeColor = isHighlighted ? "#8b5cf6" : "#cbd5e1"; // Violet if highlighted, else Slate
-                const strokeW = isHighlighted ? "3" : "2";
-                const marker = isHighlighted ? "url(#arrow-selected)" : "url(#arrow)";
+                const strokeColor = onPath ? "#7c3aed" : isHighlighted ? "#8b5cf6" : "#cbd5e1"; // Violet if highlighted, else Slate
+                const strokeW = onPath ? "3.5" : isHighlighted ? "3" : "2";
+                const marker = onPath || isHighlighted ? "url(#arrow-selected)" : "url(#arrow)";
                 
                 // Bezier curve for smooth connection
                 const d = `M${sourceX},${sourceY} C${sourceX},${(sourceY+targetY)/2} ${targetX},${(sourceY+targetY)/2} ${targetX},${targetY}`;
 
+                // 子页取值范围，直接标在这根线的起点旁
+                let rangeLabel = '';
+                if (shownKeys.length > 0) {
+                  if (convention === 'textbook') {
+                    if (childIdx <= 0) rangeLabel = `≤ ${shownKeys[0]}`;
+                    else if (childIdx >= shownKeys.length) rangeLabel = `> ${shownKeys[shownKeys.length - 1]}`;
+                    else rangeLabel = `> ${shownKeys[childIdx - 1]} 且 ≤ ${shownKeys[childIdx]}`;
+                  } else if (childIdx === 0) rangeLabel = `< ${shownKeys[0]}`;
+                  else if (childIdx >= shownKeys.length) rangeLabel = `≥ ${shownKeys[shownKeys.length - 1]}`;
+                  else rangeLabel = `${shownKeys[childIdx - 1]} – < ${shownKeys[childIdx]}`;
+                }
+
                 return (
-                  <path key={`link-${i}`} d={d} fill="none" stroke={strokeColor} strokeWidth={strokeW} markerEnd={marker} className="transition-all duration-300" />
+                  <g key={`link-${i}`}>
+                    <path d={d} fill="none" stroke={strokeColor} strokeWidth={strokeW} markerEnd={marker} className="transition-all duration-300" />
+                    {rangeLabel && (
+                      <text
+                        x={sourceX}
+                        y={sourceY + 13}
+                        textAnchor="middle"
+                        fontSize="9"
+                        fontFamily="ui-monospace, monospace"
+                        fill={onPath ? '#6d28d9' : '#94a3b8'}
+                        fontWeight={onPath ? 'bold' : 'normal'}
+                      >
+                        {rangeLabel}
+                      </text>
+                    )}
+                  </g>
                 );
               })}
 
@@ -265,11 +346,20 @@ const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, inde
                  const isSelected = selectedNode === node;
                  const isChildOfSelected = selectedNode && node.parent === selectedNode;
 
+                 const nodeId = node.data.attributes.id as string;
+                 const step = stepIndex.get(nodeId);
+                 const onPath = step !== undefined;
+                 const isHitLeaf = hitLeafId === nodeId;
+
                  let rectFill = isLeaf ? "#ecfdf5" : "#eff6ff";
                  let rectStroke = isLeaf ? "#10b981" : "#3b82f6";
                  let rectStrokeWidth = "2";
 
-                 if (isSelected) {
+                 if (onPath) {
+                     rectStroke = isHitLeaf ? "#059669" : "#7c3aed";
+                     rectFill = isHitLeaf ? "#d1fae5" : "#f5f3ff";
+                     rectStrokeWidth = "3.5";
+                 } else if (isSelected) {
                      rectStroke = "#f59e0b"; // Amber-500
                      rectFill = "#fffbeb";   // Amber-50
                      rectStrokeWidth = "3";
@@ -279,11 +369,27 @@ const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, inde
                      rectStrokeWidth = "3";
                  }
 
+                 // 指针长在节点里：innodb 挂在键格下方，textbook 挂在格与格之间的缝上
+                 const keyCount = keys.length;
+                 const cellW = keyCount > 0 ? (nodeWidth - EDGE_PAD * 2) / keyCount : 0;
+                 const pointerXs: number[] = [];
+                 if (!isLeaf) {
+                   if (convention === 'textbook') {
+                     pointerXs.push(EDGE_PAD * 0.5);
+                     for (let ci = 1; ci < keyCount; ci++) pointerXs.push(EDGE_PAD + ci * cellW);
+                     pointerXs.push(nodeWidth - EDGE_PAD * 0.5);
+                   } else {
+                     pointerXs.push(EDGE_PAD * 0.5);
+                     for (let ci = 0; ci < keyCount; ci++) pointerXs.push(EDGE_PAD + (ci + 0.5) * cellW);
+                   }
+                 }
+
                  return (
                    <g
                      key={`node-${i}`}
                      transform={`translate(${node.x},${node.y})`}
                      onClick={(e) => { e.stopPropagation(); handleNodeClick(node); }}
+                     opacity={search && !onPath ? 0.35 : 1}
                      className="cursor-pointer hover:opacity-90 transition-opacity"
                    >
                      {/* Node Container */}
@@ -297,6 +403,25 @@ const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, inde
                        className="shadow-sm transition-all duration-300"
                      />
 
+                     {/* 内部页：键下方的小指针 */}
+                     {pointerXs.map((px, pi) => (
+                       <path
+                         key={`ptr-${pi}`}
+                         d={`M${px - 4},${currentHeight - 7} L${px},${currentHeight - 1} L${px + 4},${currentHeight - 7} Z`}
+                         fill={onPath ? '#7c3aed' : '#93c5fd'}
+                       />
+                     ))}
+
+                     {/* 查找步序 */}
+                     {step !== undefined && (
+                       <g>
+                         <circle cx={nodeWidth - 12} cy={12} r={8.5} fill={isHitLeaf ? '#059669' : '#7c3aed'} />
+                         <text x={nodeWidth - 12} y={16} textAnchor="middle" fontSize="10" fontWeight="bold" fill="#fff">
+                           {step}
+                         </text>
+                       </g>
+                     )}
+
                      {/* Node Label (Top Left) */}
                      <text x="5" y="15" fontSize="10" fill={isLeaf ? "#059669" : "#1d4ed8"} fontWeight="bold">
                        {isLeaf ? "Leaf Page" : "Index Page"}
@@ -308,8 +433,12 @@ const TreeVisualizer: React.FC<TreeVisualizerProps> = ({ root, onNodeClick, inde
                              {keys.map((k: number, ki: number) => (
                                  <div key={ki} className="flex flex-col items-center flex-1 min-w-0 px-0.5">
                                      <div className={`w-full px-1 py-1 rounded text-xs font-mono font-bold border text-center ${isLeaf ? 'bg-white border-green-200 text-green-700' : 'bg-white border-blue-200 text-blue-700'}`}>
-                                         {/* The Key Value */}
-                                         <span className="text-sm block">{k}</span>
+                                         {/* The Key Value（内部页在教科书画法下显示左侧子页的最大键） */}
+                                         <span className={`text-sm block ${!isLeaf && convention === 'textbook' ? 'opacity-90' : ''}`}>
+                                             {!isLeaf && convention === 'textbook'
+                                                 ? (node.data.attributes.boundaryKeys?.[ki] ?? k)
+                                                 : k}
+                                         </span>
 
                                          {/* The "Payload" for Leaf Nodes - Support multiple records */}
                                          {isLeaf && rowData && rowData[ki] && rowData[ki].length > 0 && (

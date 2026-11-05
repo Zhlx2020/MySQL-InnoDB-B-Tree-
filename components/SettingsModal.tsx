@@ -54,7 +54,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, config, 
               className="w-full rounded-lg border-gray-300 border p-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
             >
               <option value={AIProvider.GEMINI}>Google Gemini (推荐)</option>
-              <option value={AIProvider.SILICONFLOW}>硅基流动 (SiliconFlow)</option>
+              <option value={AIProvider.SILICONFLOW}>OpenAI 兼容接口（本地网关 / 硅基流动）</option>
               <option value={AIProvider.OLLAMA}>Ollama (本地)</option>
             </select>
           </div>
@@ -73,7 +73,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, config, 
               <p className="text-xs text-gray-500 mt-1">
                 {localConfig.provider === AIProvider.GEMINI 
                   ? "需要有效的 Gemini API Key。" 
-                  : "需要有效的 SiliconFlow API Token。"}
+                  : "填 OpenAI 兼容服务的 Token。Base URL 留 /v1 即走本机代理。"}
               </p>
             </div>
           )}

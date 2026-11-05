@@ -9,6 +9,31 @@ type BPlusTreeOptions = {
   uniqueKeys?: boolean;
 };
 
+export interface SearchStep {
+  nodeId: string;
+  keys: number[];
+  key: number;
+  /** 选中的子页下标；叶子页为 null */
+  nextChild: number | null;
+  text: string;
+}
+
+/**
+ * 分隔键的两种写法，只影响"等值怎么落"和文案，不影响树结构：
+ * - innodb：分隔键 = 右侧子页的最小键，`key >= 分隔键` 走右侧
+ * - textbook：分隔键 = 左侧子页的最大键，`key <= 分隔键` 走左侧
+ */
+export type SeparatorConvention = 'innodb' | 'textbook';
+
+/** 子树里的最大键（一路取最右子页的最后一个键），教科书画法的分隔键用它 */
+export const maxKeyOfSubtree = (node: BPlusTreeNode): number | undefined => {
+  let current: BPlusTreeNode = node;
+  while (!current.isLeaf && current.children.length > 0) {
+    current = current.children[current.children.length - 1];
+  }
+  return current.keys.length > 0 ? current.keys[current.keys.length - 1] : undefined;
+};
+
 export class BPlusTree {
   root: BPlusTreeNode;
   keySelector: KeySelector;
@@ -142,6 +167,63 @@ export class BPlusTree {
     }
 
     return current;
+  }
+
+  /**
+   * 一次查找的逐步轨迹，给可视化与测试用。
+   * 同一棵树、同一次下降，两种分隔键写法只是等值归属与文案不同，落点一致。
+   */
+  searchPath(
+    key: number,
+    convention: SeparatorConvention = 'innodb'
+  ): { steps: SearchStep[]; found: boolean; leafId: string } {
+    const steps: SearchStep[] = [];
+    let current = this.root;
+
+    while (!current.isLeaf) {
+      // innodb 用右侧最小键（n 个），textbook 用左侧最大键（前 n 个子页，最后一个子页是兜底）
+      const keys =
+        convention === 'innodb'
+          ? [...current.keys]
+          : current.children
+              .slice(0, -1)
+              .map(child => maxKeyOfSubtree(child))
+              .filter((k): k is number => k !== undefined);
+
+      let i = 0;
+      if (convention === 'innodb') {
+        while (i < keys.length && key >= keys[i]) i++;
+      } else {
+        while (i < keys.length && key > keys[i]) i++;
+      }
+
+      let text: string;
+      if (keys.length === 0) {
+        text = '空内部页，无路可走';
+      } else if (convention === 'innodb') {
+        if (i === 0) text = `${key} < ${keys[0]}，走最左子页`;
+        else if (i >= keys.length) text = `${key} ≥ ${keys[keys.length - 1]}，走最右子页`;
+        else text = `${key} ≥ ${keys[i - 1]} 且 < ${keys[i]}，走中间子页`;
+      } else {
+        if (i === 0) text = `${key} ≤ ${keys[0]}，走最左子页`;
+        else if (i >= keys.length) text = `${key} > ${keys[keys.length - 1]}，走最右子页`;
+        else text = `${key} > ${keys[i - 1]} 且 ≤ ${keys[i]}，走中间子页`;
+      }
+
+      steps.push({ nodeId: current.id, keys, key, nextChild: i, text });
+      current = current.children[i];
+    }
+
+    const found = current.keys.includes(key);
+    steps.push({
+      nodeId: current.id,
+      keys: [...current.keys],
+      key,
+      nextChild: null,
+      text: found ? `叶子页含 ${key}，命中` : `叶子页不含 ${key}，未命中`,
+    });
+
+    return { steps, found, leafId: current.id };
   }
 
   // Delete a row from the tree

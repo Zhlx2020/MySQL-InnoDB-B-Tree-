@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { BPlusTree } from './utils/bPlusTreeLogic';
+import { BPlusTree, SeparatorConvention } from './utils/bPlusTreeLogic';
 import { TableRow, AIConfig, DEFAULT_AI_CONFIG, AIProvider } from './types';
 import TreeVisualizer from './components/TreeVisualizer';
 import DataTable from './components/DataTable';
@@ -24,8 +24,39 @@ function App() {
     const pkTree = useMemo(() => BPlusTree.fromRows(data, r => r.id, { uniqueKeys: true }), [data]);
     const secTree = useMemo(() => BPlusTree.fromRows(data, r => r.age, { uniqueKeys: false }), [data]);
 
+    // 查找演示
+    const [searchInput, setSearchInput] = useState('');
+    const [searchKey, setSearchKey] = useState<number | null>(null);
+    const [convention, setConvention] = useState<SeparatorConvention>('innodb');
+    const [revealed, setRevealed] = useState(0);
+    const activeTree = viewMode === 'secondary' ? secTree : pkTree;
+    const searchTrace = useMemo(
+        () => (searchKey === null ? null : activeTree.searchPath(searchKey, convention)),
+        [activeTree, searchKey, convention]
+    );
+
+    // 逐步回放，每步 450ms
+    useEffect(() => {
+        if (!searchTrace) {
+            setRevealed(0);
+            return;
+        }
+        setRevealed(1);
+        const timers: number[] = [];
+        for (let i = 2; i <= searchTrace.steps.length; i++) {
+            timers.push(window.setTimeout(() => setRevealed(i), (i - 1) * 450));
+        }
+        return () => timers.forEach(t => window.clearTimeout(t));
+    }, [searchTrace]);
+
+    const visibleSteps = searchTrace ? searchTrace.steps.slice(0, Math.max(revealed, 1)) : [];
+    const traceDone = !searchTrace || revealed >= searchTrace.steps.length;
+    const displayTrace = searchTrace
+        ? { steps: visibleSteps, found: traceDone && searchTrace.found, key: searchTrace.key, leafId: traceDone ? searchTrace.leafId : '' }
+        : null;
+
     // AI State
-    const [aiConfig, setAiConfig] = useState<AIConfig>(DEFAULT_AI_CONFIG[AIProvider.GEMINI]);
+    const [aiConfig, setAiConfig] = useState<AIConfig>(DEFAULT_AI_CONFIG[AIProvider.SILICONFLOW]);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [aiResponse, setAiResponse] = useState<string>('');
     const [isThinking, setIsThinking] = useState(false);
@@ -322,11 +353,76 @@ ${data.map(r => `INSERT INTO users (id, name, age) VALUES (${r.id}, '${r.name}',
                         <>
                             <div className="flex-1 min-h-[400px]">
                                 {viewMode === 'clustered' ? (
-                                    <TreeVisualizer root={pkTree.root} onNodeClick={handleNodeClick} indexType="primary" />
+                                    <TreeVisualizer root={pkTree.root} onNodeClick={handleNodeClick} indexType="primary" search={displayTrace} convention={convention} />
                                 ) : (
-                                    <TreeVisualizer root={secTree.root} onNodeClick={handleNodeClick} indexType="secondary" />
+                                    <TreeVisualizer root={secTree.root} onNodeClick={handleNodeClick} indexType="secondary" search={displayTrace} convention={convention} />
                                 )}
                             </div>
+
+                            {/* 查找演示：输入键 -> 逐步回放 */}
+                            <div className="mt-3 mx-auto w-fit flex items-center gap-2 bg-white px-3 py-2 rounded-full shadow-sm border border-gray-100">
+                                <span className="text-xs text-gray-500">查一个键，看它怎么走：</span>
+                                <input
+                                    type="number"
+                                    value={searchInput}
+                                    onChange={(e) => setSearchInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && searchInput !== '') setSearchKey(Number(searchInput));
+                                        if (e.key === 'Escape') { setSearchKey(null); setSearchInput(''); }
+                                    }}
+                                    placeholder={viewMode === 'secondary' ? 'age' : 'id'}
+                                    className="w-20 rounded-lg border border-gray-300 px-2 py-1 text-xs font-mono focus:ring-2 focus:ring-indigo-500"
+                                />
+                                <button
+                                    onClick={() => searchInput !== '' && setSearchKey(Number(searchInput))}
+                                    className="text-xs px-3 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                                >
+                                    走一遍
+                                </button>
+                                {searchTrace && !traceDone && (
+                                    <button
+                                        onClick={() => setRevealed(searchTrace.steps.length)}
+                                        className="text-xs px-3 py-1 rounded-lg border border-indigo-300 text-indigo-600 hover:bg-indigo-50"
+                                    >
+                                        跳过
+                                    </button>
+                                )}
+                                <button
+                                    onClick={() => { setSearchKey(null); setSearchInput(''); }}
+                                    className="text-xs px-3 py-1 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50"
+                                >
+                                    清除
+                                </button>
+                                <span className="w-px h-4 bg-gray-200 mx-1" />
+                                <span className="text-xs text-gray-400">画法</span>
+                                <button
+                                    onClick={() => setConvention('innodb')}
+                                    className={`text-xs px-2 py-1 rounded-lg border ${convention === 'innodb' ? 'bg-indigo-600 text-white border-indigo-600' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                                >
+                                    InnoDB
+                                </button>
+                                <button
+                                    onClick={() => setConvention('textbook')}
+                                    className={`text-xs px-2 py-1 rounded-lg border ${convention === 'textbook' ? 'bg-indigo-600 text-white border-indigo-600' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                                >
+                                    教科书
+                                </button>
+                            </div>
+
+                            {searchTrace && (
+                                <div className="mt-2 mx-auto max-w-2xl text-xs font-mono bg-white border rounded-xl px-4 py-2 shadow-sm">
+                                    {visibleSteps.map((s, i) => (
+                                        <div key={i} className="flex gap-2 py-0.5">
+                                            <span className="text-indigo-600 font-bold shrink-0">{i + 1}.</span>
+                                            <span className="text-gray-400 shrink-0">在 [{s.keys.join(', ')}] 里</span>
+                                            <span className={s.nextChild === null ? (searchTrace.found ? 'text-green-600 font-bold' : 'text-red-500 font-bold') : 'text-gray-700'}>
+                                                {s.text}
+                                            </span>
+                                        </div>
+                                    ))}
+                                    {!traceDone && <div className="py-0.5 text-gray-300">…</div>}
+                                </div>
+                            )}
 
                             <div className="mt-6 flex gap-8 justify-center text-sm text-gray-500 bg-white py-3 px-6 rounded-full shadow-sm border border-gray-100 mx-auto w-fit">
                                 <div className="flex items-center gap-2">
@@ -344,6 +440,13 @@ ${data.map(r => `INSERT INTO users (id, name, age) VALUES (${r.id}, '${r.name}',
                                         </span>
                                     </div>
                                 )}
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs text-slate-600 bg-slate-100 px-2 py-1 rounded border border-slate-200 leading-snug">
+                                        {convention === 'innodb'
+                                            ? 'InnoDB 画法：内部页存的是右侧子页的最小键，key ≥ 该键走右边。3 同时出现在根和叶子里，是同一个键的两份。'
+                                            : '教科书画法：内部页存的是左侧子页的最大键，key ≤ 该键走左边，大于最后一个走最右。结构一样，只是等值归属反过来。'}
+                                    </span>
+                                </div>
                             </div>
                         </>
                     )}
